@@ -9,7 +9,7 @@ using Images, SparseArrays
 
 # ╔═╡ e15aff74-1386-11eb-31b2-a364ef6b249a
 md"# Image Triangulation  
-In this notebook, we will perform image triangulation based on the paper 'Stylized Image Triangulation'. The original code for the paper can be found [here](https://github.com/tobguent/image-triangulation). Since that is a combination of MatLab and C++, both of which I am not very familiar with, I found it difficult to follow. I therefore chose to implement this in Julia, which I want to learn, and which makes coding this very simple and fast.
+In this notebook, we will perform image triangulation based on the paper 'Stylized Image Triangulation' by Kai Lawonn and Tobias Günther. The original code for the paper can be found [here](https://github.com/tobguent/image-triangulation). Since that is a combination of MatLab and C++, both of which I am not very familiar with, I found it difficult to follow. I therefore chose to implement this in Julia, which I want to learn, and which makes coding this very simple and fast.
 "
 
 # ╔═╡ 60345e14-0fcf-11eb-3252-65308a84851b
@@ -68,11 +68,57 @@ function generate_regular_grid(imwidth, imheight, n_points_x, n_points_y)
 end
 
 # ╔═╡ aaa962be-1191-11eb-2a5a-910d2525765a
-function xrange_yrange(triangle, width, height)	
+function xrange_yrange(triangle, width, height)
+	# Return the smallest and largest coordinates that could be inside
+	# the triangle
 	xs = min.(max.([t[1] for t in triangle], 1), width)
 	ys = min.(max.([t[2] for t in triangle], 1), height)
 	
 	minimum(xs), maximum(xs), minimum(ys), maximum(ys)
+end
+
+# ╔═╡ af3ad1ec-12b2-11eb-0b5f-e5732664b072
+function find_1ring(point_index, points, triangles, adjacent_triangles)
+	# Return all vertices that are on triangles adjacent to a certain point,
+	# excluding the point itself
+	# 1ring-point indices
+	pis = [pi for ti in adjacent_triangles for pi in triangles[:, ti] if pi != point_index]
+	
+	[points[:, i] for i in unique(pis)]
+end
+
+# ╔═╡ 83a210bc-12b3-11eb-0355-d339e466a369
+function regularization(point_index, points, triangles, adjacent_triangles)
+	# Move a point towards the center of the points of the adjacent triangles
+	
+	point = points[:, point_index]
+	
+	ns = find_1ring(point_index, points, triangles, adjacent_triangles)
+		
+	(sum(n for n in ns) ./ length(ns)) - point
+end
+
+# ╔═╡ 7489e73c-1211-11eb-2242-9f477e72fc2a
+function update_point(point, step_size, λ, grad, reg, width, height)
+	new_point = round.(Int, point - (step_size * grad) + (λ * reg))
+	
+	# Make sure point is within bounds
+	new_point[1] = max(min(new_point[1], width), 1)
+	new_point[2] = max(min(new_point[2], height), 1)
+
+	# Do not move boundary points
+	if point[1] == 1
+		new_point[1] = 1
+	elseif point[1] == height
+		new_point[1] = height
+	end
+	if point[2] == 1
+		new_point[2] = 1
+	elseif point[2] == width
+		new_point[2] = width
+	end
+	
+	new_point
 end
 
 # ╔═╡ a9a6cc34-1197-11eb-1bcf-198f3f9843cd
@@ -92,16 +138,10 @@ function isinside(triangle, point)
     !(has_neg && has_pos)
 end
 
-# ╔═╡ e4fa3130-0fcc-11eb-0db2-af157823d58f
-im = load("ekster.jpeg")
-
-# ╔═╡ 11463f0a-1148-11eb-2e90-f9435eb460d1
-im_rgb = channelview(im);
-
 # ╔═╡ 43b92be8-1146-11eb-039b-8565ead70dfa
-function triangle_color(triangle)
-	# The triangle error is the difference of the triangle color (average) and
-	# the points that lie within it
+function triangle_color(triangle, im_rgb)
+	# The triangle color is the average of the color of
+	# points within the triangle
 	r = Float32[]
 	g = Float32[]
 	b = Float32[]
@@ -123,7 +163,7 @@ function triangle_color(triangle)
 end
 
 # ╔═╡ 4733f55a-1196-11eb-08b4-3378b081ebc7
-function triangle_error(triangle)
+function triangle_error(triangle, im_rgb)
 	# The triangle error is the difference of the triangle color (average) and
 	# the points that lie within it
 	r = Float32[]
@@ -146,10 +186,11 @@ function triangle_error(triangle)
 	error = (sum((r .- trianglecolor[1]).^2) + sum((g .- trianglecolor[2]).^2) + sum((b .- trianglecolor[3]).^2)) / 3
 	
 	error
-end
+end 
 
 # ╔═╡ 9795130e-11ea-11eb-0e93-5fd4c59a31ad
-function triangle_gradient(triangle, point_index)
+function triangle_gradient(triangle, point_index, im_rgb)
+	# Calculate the gradient of triangle with respect to point_index
 	x1 = copy(triangle)
 	x2 = copy(triangle)
 	y1 = copy(triangle)
@@ -161,87 +202,38 @@ function triangle_gradient(triangle, point_index)
 	y1[point_index] += [0, 1]
 	y2[point_index] -= [0, 1]
 	
-	dx = (triangle_error(x1) - triangle_error(x2)) / 2
-	dy = (triangle_error(y1) - triangle_error(y2)) / 2
+	dx = (triangle_error(x1, im_rgb) - triangle_error(x2, im_rgb)) / 2
+	dy = (triangle_error(y1, im_rgb) - triangle_error(y2, im_rgb)) / 2
 	
 	[dx, dy]
 end
 
-# ╔═╡ 432e03ec-0fcf-11eb-0335-05802e9ce929
-begin
-	width, height = size(im)
-	n_points_x, n_points_y = 5, 5
-end
-
-# ╔═╡ 15e9619c-1194-11eb-3fda-a32a832f3b14
-begin
-	step_size = 1
-	λ = 1e-3
-	
-	# Generate initial grid
-	points, triangles, neighbors, neighbor_start_index, n_neighbors = generate_regular_grid(width, height, n_points_x, n_points_y)
-	
-	n_triangles = size(triangles)[2]
-	n_points = size(points)[2]
-end
-
-# ╔═╡ af3ad1ec-12b2-11eb-0b5f-e5732664b072
-function find_1ring(point_index, neighbors, neighbor_start_index, n_neighbors, triangles)
-	# Return all vertices that are on triangles adjacent to a certain point,
-	# excluding the point itself
-	first_neighbor = neighbor_start_index[point_index]
-	last_neighbor = first_neighbor + n_neighbors[point_index] - 1
-	
-	# Adjacent triangle indices
-	ns = neighbors[first_neighbor:last_neighbor]
-	
-	# 1ring-point indices
-	pi = [p for n in ns for p in triangles[:, n] if p != point_index]
-	
-	[points[:, i] for i in unique(pi)]
-end
-
-# ╔═╡ 83a210bc-12b3-11eb-0355-d339e466a369
-function regularization(point_index, neighbors, neighbor_start_index, n_neighbors, triangles)
-	# Move a point towards the center of the points of the adjacent triangles
-	
-	point = points[:, point_index]
-	
-	ns = find_1ring(point_index, neighbors, neighbor_start_index, n_neighbors, triangles)
-		
-	(sum(n for n in ns) ./ length(ns)) - point
-end
-
 # ╔═╡ 23c20d76-117f-11eb-297e-0376a11533bd
-function point_gradient(point_index, neighbors, neighbor_start_index, n_neighbors, triangles)
-	first_neighbor = neighbor_start_index[point_index]
-	last_neighbor = first_neighbor + n_neighbors[point_index] - 1
-	
-	ns = neighbors[first_neighbor:last_neighbor]
-	
+function point_gradient(point_index, points, triangles, adjacent_triangles, im_rgb)
+
 	grad = [0., 0.]
-	for i in ns
+	for i in adjacent_triangles
 		# triangle = triangle_objects[i]
 		triangle_points = triangles[:, i]
 		which_point = findfirst(triangle_points .== point_index)
 		
 		triangle = [points[:, j] for j in triangle_points]
-		grad = grad .+ triangle_gradient(triangle, which_point)
+		grad = grad .+ triangle_gradient(triangle, which_point, im_rgb)
 	end
 	
-	reg = regularization(point_index, neighbors, neighbor_start_index, n_neighbors, triangles)
-		
 	grad
 end
 
 # ╔═╡ e761f3b8-117f-11eb-12b7-6f1c2a3d0977
-function draw_image(triangles, colors)
+function draw_image(triangles, points, im_rgb, width, height)
 	img = zeros(RGB{Float32}, width, height)
 	
 	for x=1:width, y=1:height
 		for i in 1:size(triangles)[2]
-			if isinside([points[:, j] for j in triangles[:, i]], [x; y])
-				img[x, y] = RGB(colors[i]...)
+			triangle = [points[:, j] for j in triangles[:, i]]
+			if isinside(triangle, [x; y])
+				color = triangle_color(triangle, im_rgb)
+				img[x, y] = RGB(color...)
 				break
 			end
 		end
@@ -250,50 +242,54 @@ function draw_image(triangles, colors)
 	img
 end
 
-# ╔═╡ 7489e73c-1211-11eb-2242-9f477e72fc2a
-function update_point(point, step_size, grad, reg, width, height)
-	new_point = round.(Int, point - (step_size * grad) + (λ * reg))
-	
-	# Make sure point is within bounds
-	new_point[1] = max(min(new_point[1], width), 1)
-	new_point[2] = max(min(new_point[2], height), 1)
-
-	# Do not move boundary points
-	if point[1] == 1
-		new_point[1] = 1
-	elseif point[1] == height
-		new_point[1] = height
-	end
-	if point[2] == 1
-		new_point[2] = 1
-	elseif point[2] == width
-		new_point[2] = width
-	end
-	
-	new_point
-end
-
 # ╔═╡ 562a1e58-118b-11eb-28a1-c576d975bb6d
-for j in 1:40
-	triangle_objects = [[points[:, i] for i in triangles[:, j]] for j in 1:n_triangles]
-	triangle_colors = [triangle_color(triangle) for triangle in triangle_objects]
+function gradient_descent(points, triangles, neighbors, neighbor_start_index, n_neighbors, im_rgb, width, height, n_steps, step_size, λ)
 	
-	# Update points
-	for i in 1:n_points
-		grad = point_gradient(i, neighbors, neighbor_start_index, n_neighbors, triangles)
-		reg = regularization(i, neighbors, neighbor_start_index, n_neighbors, triangles)
+	n_triangles = size(triangles)[2]
+	n_points = size(points)[2]
 
-		points[:, i] = update_point(points[:, i], step_size, grad, reg, width, height)
+	for j in 1:n_steps
+		# Update points
+		for i in 1:n_points
+			point = points[:, i]
+
+			# Adjacent triangle indices
+			first_neighbor = neighbor_start_index[i]
+			last_neighbor = first_neighbor + n_neighbors[i] - 1
+			adjacent_triangles = neighbors[first_neighbor:last_neighbor]
+
+			grad = point_gradient(i, points, triangles, adjacent_triangles, im_rgb)
+			reg = regularization(i, points, triangles, adjacent_triangles)
+
+			points[:, i] = update_point(point, step_size, λ, grad, reg, width, height)
+		end
 	end
+	
+	triangles, points
 end
+
+# ╔═╡ 21c14a46-13c8-11eb-2780-2f4d79801128
+im = load("blauwborst.jpeg")
 
 # ╔═╡ ad415226-1195-11eb-2b9f-73142b04de89
-begin
-	triangle_objects = [[points[:, i] for i in triangles[:, j]] for j in 1:n_triangles]
+begin	
+	step_size = 1
+	λ = 1e-3
+	n_steps = 30
+	n_points_x, n_points_y = 5, 5
 
-	triangle_colors = [triangle_color(triangle) for triangle in triangle_objects]
-
-	draw_image(triangles, triangle_colors)
+	width, height = size(im)
+	im_rgb = channelview(im)
+	
+	# Generate initial grid
+	points, triangles, neighbors, neighbor_start_index, n_neighbors = generate_regular_grid(width, height, n_points_x, n_points_y)
+	
+	triangles, points = gradient_descent(points, triangles, neighbors,
+										 neighbor_start_index, n_neighbors,
+										 im_rgb, width, height,
+										 n_steps, step_size, λ)
+	
+	draw_image(triangles, points, im_rgb, width, height)
 end
 
 # ╔═╡ Cell order:
@@ -311,9 +307,6 @@ end
 # ╠═7489e73c-1211-11eb-2242-9f477e72fc2a
 # ╠═a9a6cc34-1197-11eb-1bcf-198f3f9843cd
 # ╠═8e67dbfc-1197-11eb-1ead-e7aee9325796
-# ╠═e4fa3130-0fcc-11eb-0db2-af157823d58f
-# ╠═11463f0a-1148-11eb-2e90-f9435eb460d1
-# ╠═432e03ec-0fcf-11eb-0335-05802e9ce929
-# ╠═15e9619c-1194-11eb-3fda-a32a832f3b14
 # ╠═562a1e58-118b-11eb-28a1-c576d975bb6d
+# ╠═21c14a46-13c8-11eb-2780-2f4d79801128
 # ╠═ad415226-1195-11eb-2b9f-73142b04de89
