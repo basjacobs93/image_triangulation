@@ -5,11 +5,11 @@ using Markdown
 using InteractiveUtils
 
 # ╔═╡ d36d547e-0fcc-11eb-1213-af7a3f5dab8a
-using Images, SparseArrays
+using Images, SparseArrays, VoronoiDelaunay, StatsBase
 
 # ╔═╡ e15aff74-1386-11eb-31b2-a364ef6b249a
 md"# Image Triangulation  
-In this notebook, we will perform image triangulation based on the paper 'Stylized Image Triangulation' by Kai Lawonn and Tobias Günther. The original code for the paper can be found [here](https://github.com/tobguent/image-triangulation). Since that is a combination of MatLab and C++, both of which I am not very familiar with, I found it difficult to follow. I therefore chose to implement this in Julia, which I want to learn, and which makes coding this very simple and fast.
+In this notebook, we will perform image triangulation based on the paper 'Stylized Image Triangulation' by Kai Lawonn and Tobias Günther. The original code for the paper can be found [here](https://github.com/tobguent/image-triangulation). Since that is a combination of MatLab and C++ code, neither of which I am very familiar with, I found it difficult to follow. I therefore chose to implement this in Julia, which I want to learn, and which makes coding this very simple and fast.
 "
 
 # ╔═╡ 60345e14-0fcf-11eb-3252-65308a84851b
@@ -47,7 +47,14 @@ function generate_regular_grid(imwidth, imheight, n_points_x, n_points_y)
 	triangles[2, 2:2:end] = triangles[3, 2:2:end] .+ 1
 	
 	
+	points, triangles
+end
+
+# ╔═╡ 0da11472-148b-11eb-3a01-6f4fff588360
+function generate_neighbors_lists(points, triangles)
 	# Build lists to return that make indexing faster
+	n_points = size(points)[2]
+	
 	neighbors = Int[] # list of all neighbors for all points
 	neighbor_start_index = zeros(Int, 1, n_points) # index of first neighbor for point
 	n_neighbors = zeros(Int, 1, n_points) # number of neighbors for point
@@ -63,8 +70,8 @@ function generate_regular_grid(imwidth, imheight, n_points_x, n_points_y)
 			neighbor_start_index[i] = neighbor_start_index[i-1] + n_neighbors[i-1];
 		end
 	end
-
-	points, triangles, neighbors, neighbor_start_index, n_neighbors
+	
+	neighbors, neighbor_start_index, n_neighbors
 end
 
 # ╔═╡ aaa962be-1191-11eb-2a5a-910d2525765a
@@ -273,29 +280,116 @@ im = load("blauwborst.jpeg")
 
 # ╔═╡ ad415226-1195-11eb-2b9f-73142b04de89
 begin	
-	step_size = 1
-	λ = 1e-3
-	n_steps = 30
-	n_points_x, n_points_y = 5, 5
+	step_size = 2
+	λ = 1e-2
+	n_steps = 40
+	n_points_x, n_points_y = 16, 16
 
 	width, height = size(im)
 	im_rgb = channelview(im)
 	
 	# Generate initial grid
-	points, triangles, neighbors, neighbor_start_index, n_neighbors = generate_regular_grid(width, height, n_points_x, n_points_y)
+# 	points, triangles = generate_regular_grid(width, height, n_points_x, n_points_y)
+# 	neighbors, neighbor_start_index, n_neighbors = generate_neighbors_lists(points, triangles)
 	
-	triangles, points = gradient_descent(points, triangles, neighbors,
-										 neighbor_start_index, n_neighbors,
-										 im_rgb, width, height,
-										 n_steps, step_size, λ)
+# 	triangles, points = gradient_descent(points, triangles, neighbors,
+# 										 neighbor_start_index, n_neighbors,
+# 										 im_rgb, width, height,
+# 										 n_steps, step_size, λ)
 	
-	draw_image(triangles, points, im_rgb, width, height)
+# 	draw_image(triangles, points, im_rgb, width, height)
 end
+
+# ╔═╡ 9c6d7056-1474-11eb-0a3c-a1568b4f5c14
+function convolve(im, kernel)
+	width, height = size(im)
+	kernel_width, kernel_height = size(kernel)
+	
+	im_new = copy(im)
+	
+	margin = (kernel_width-1)÷2
+	
+	for x in (margin+1):(width-margin)
+		for y in (margin+1):(height-margin)
+			im_new[x, y] = sum(im[(x-margin):(x+margin), (y-margin):(y+margin)] * kernel)
+		end
+	end
+	
+	im_new
+end
+
+# ╔═╡ e379faf0-1476-11eb-0a1f-db6d6ef2c58f
+function generate_importance_grid(im, width, height, n_points)
+	# Generate a grid based on importance of points via a simple edge detection,
+	# connecting these points with a delaunay 
+	im_gray = gray.(float(Gray.(im)))
+	kernel = [-1 -1 -1; -1 8 -1; -1 -1 -1]
+	edges = convolve(im_gray, kernel)
+	
+	coords = [(x, y) for x in 1:width for y in 1:height]
+	weights = [edges[x, y] for x in 1:width for y in 1:height]
+	weights = weights .- minimum(weights) # make sure weights are positive
+	
+	# Sample points
+	points = sample(coords, Weights(weights), n_points, replace=false)
+	# Add corners
+	append!(points, [(1, 1), (1, height), (width, 1), (width, height)])
+
+	# Scale to [1, 2] since that's needed by DelaunayTesselation
+	offset = 1.01
+	scale = 0.98 / max( height - 1, width - 1 )	
+	
+	# Create tesselation
+	point_list = Point2D[Point(( point[1]-1 ) * scale + offset, (point[2]-1) * scale + offset) for point in points]
+	tess = DelaunayTessellation2D(n_points)
+	push!(tess, point_list)
+	
+	# Convert to useful form for our algorithm
+	n_triangles = tess._last_trig_index
+	
+	triangles = zeros(Int, 3, n_triangles)
+
+	# Create triangles array
+	for triangle_index in 1:n_triangles
+		tri = tess._trigs[triangle_index]
+		pts = [geta(tri), getb(tri), getc(tri)]
+		
+		for i in 1:3
+			pi = findfirst([pl == pts[i] for pl in point_list])
+			
+			if isnothing(pi)
+				push!(point_list, pts[i])
+				pi = length(point_list)
+			end
+			triangles[i, triangle_index] = pi
+		end
+	end
+	
+	# Rescale points to original range
+	n_points = length(point_list)
+	points = zeros(Int, 2, n_points)
+
+	for point_index in 1:n_points
+		pt_scaled = point_list[point_index]
+		pt = round.(Int, [(getx(pt_scaled) - offset) / scale + 1,
+						  (gety(pt_scaled) - offset) / scale + 1])
+		points[:, point_index] = pt
+	end
+	
+	points, triangles
+end
+
+# ╔═╡ 880c5a32-1523-11eb-2840-0b0ec8bfb7e4
+points, triangles = generate_importance_grid(im, width, height, 19)
+
+# ╔═╡ 00fead70-1527-11eb-3648-5109395a04f0
+draw_image(triangles, points, im_rgb, width, height)
 
 # ╔═╡ Cell order:
 # ╠═e15aff74-1386-11eb-31b2-a364ef6b249a
 # ╠═d36d547e-0fcc-11eb-1213-af7a3f5dab8a
 # ╠═60345e14-0fcf-11eb-3252-65308a84851b
+# ╠═0da11472-148b-11eb-3a01-6f4fff588360
 # ╠═aaa962be-1191-11eb-2a5a-910d2525765a
 # ╠═43b92be8-1146-11eb-039b-8565ead70dfa
 # ╠═4733f55a-1196-11eb-08b4-3378b081ebc7
@@ -310,3 +404,7 @@ end
 # ╠═562a1e58-118b-11eb-28a1-c576d975bb6d
 # ╠═21c14a46-13c8-11eb-2780-2f4d79801128
 # ╠═ad415226-1195-11eb-2b9f-73142b04de89
+# ╠═9c6d7056-1474-11eb-0a3c-a1568b4f5c14
+# ╠═e379faf0-1476-11eb-0a1f-db6d6ef2c58f
+# ╠═880c5a32-1523-11eb-2840-0b0ec8bfb7e4
+# ╠═00fead70-1527-11eb-3648-5109395a04f0
