@@ -53,8 +53,9 @@ end
 
 # ╔═╡ 9c6d7056-1474-11eb-0a3c-a1568b4f5c14
 function convolve(im::Array{Float32,2}, kernel::Array{Int64,2})::Array{Float64,2}
-	width, height = size(im)
-	kernel_width, kernel_height = size(kernel)
+	# Apply convolution on `im` given `kernel` 
+	height, width = size(im)
+	kernel_height, kernel_width = size(kernel)
 	
 	im_new = copy(im)
 	
@@ -78,7 +79,7 @@ function generate_importance_grid(im_gray::Array{Float32,2}, width::Int64,
 	edges = convolve(im_gray, kernel)
 	
 	coords = [(x, y) for x in 1:width for y in 1:height]
-	weights = [edges[x, y] for x in 1:width for y in 1:height]
+	weights = [edges[y, x] for x in 1:width for y in 1:height]
 	weights = weights .- minimum(weights) # make sure weights are positive
 	
 	# Sample points
@@ -193,6 +194,7 @@ end
 function update_point(point::Array{Int64,1}, step_size::Float64, λ::Float64,
 					  grad::Array{Float64,1}, reg::Array{Float64,1},
 					  width::Int64, height::Int64)::Array{Int64,1}
+	# Update point location, satisfying width and height of image
 	new_point = round.(Int, point - (step_size * grad) + (λ * reg))
 	
 	# Make sure point is within bounds
@@ -216,11 +218,13 @@ end
 
 # ╔═╡ a9a6cc34-1197-11eb-1bcf-198f3f9843cd
 function sign(p1::Array{Int64,1}, p2::Array{Int64,1}, p3::Array{Int64,1})::Int64
+	# Helper function for `isinside`
 	(p1[1] - p3[1]) * (p2[2] - p3[2]) - (p2[1] - p3[1]) * (p1[2] - p3[2])
 end
 
 # ╔═╡ 8e67dbfc-1197-11eb-1ead-e7aee9325796
 function isinside(triangle::Array{Int64,2}, point::Array{Int64,1})::Bool
+	# Returns boolean whether point lies inside triangle
     d1 = sign(point, triangle[:,1], triangle[:,2])
     d2 = sign(point, triangle[:,2], triangle[:,3])
     d3 = sign(point, triangle[:,3], triangle[:,1])
@@ -312,6 +316,7 @@ end
 function point_gradient(point_index::Int64, points::Array{Int64,2},
 					    triangles::Array{Int64,2},
 						adjacent_triangles::Array{Int64,1}, im_rgb::Array{N0f8,3})::Array{Float64,1}
+	# Calculate the gradient for the point at index `point_index`
 
 	grad = [0., 0.]
 	for i in adjacent_triangles
@@ -322,12 +327,13 @@ function point_gradient(point_index::Int64, points::Array{Int64,2},
 		grad = grad .+ triangle_gradient(triangle, which_point, im_rgb)
 	end
 	
-	grad
+	grad./length(adjacent_triangles)
 end
 
 # ╔═╡ e761f3b8-117f-11eb-12b7-6f1c2a3d0977
 function draw_image(triangles::Array{Int64,2}, points::Array{Int64,2}, 
 					im_rgb::Array{N0f8,3}, width::Int64, height::Int64)::Array{ColorTypes.RGB{Float32},2}
+	# Draw the image by calculating the color of every triangle
 	img = zeros(RGB{Float32}, height, width)
 	
 	triangle_colors = []
@@ -352,18 +358,43 @@ end
 
 # ╔═╡ 99ead454-1fa0-11eb-0c97-b159b530ceaa
 function centroid(triangle::Array{Int64,2})::Array{Int64,1}
+	# Returns center of triangle
 	[round.(Int, mean(triangle[1, :])), round.(Int, mean(triangle[2, :]))]
 end
 
 # ╔═╡ 9ee47e42-2522-11eb-3253-d5a314d33b44
 function triangle_size(triangle)::Float64
-	width = maximum(triangle[1, :]) - minimum(triangle[1, :])
-	height = maximum(triangle[2, :]) - minimum(triangle[2, :])
-	min(width, height)
+	# Returns the length of the longest side of the triangle
+	x1, x2, x3 = triangle[1, :]
+	y1, y2, y3 = triangle[2, :]
+	
+	s1 = sqrt((x1-x2)^2 + (y1-y2)^2)
+	s2 = sqrt((x2-x3)^2 + (y2-y3)^2)
+	s3 = sqrt((x3-x1)^2 + (y3-y1)^2)
+	
+	max(s1, s2, s3)
+end
+
+# ╔═╡ 66877a86-2985-11eb-3e14-439d0b057cbb
+function triangle_stretchedness(triangle)::Float64
+	# Returns the ratio between the longest side and the height of a triangle
+	x1, x2, x3 = triangle[1, :]
+	y1, y2, y3 = triangle[2, :]
+	
+	s1 = sqrt((x1-x2)^2 + (y1-y2)^2)
+	s2 = sqrt((x2-x3)^2 + (y2-y3)^2)
+	s3 = sqrt((x3-x1)^2 + (y3-y1)^2)
+	
+	width = max(s1, s2, s3)
+	area = abs(x1*y2 + x2*y3 + x3*y1 - y1*x2 - y2*x3 - y3*x1)
+	height = area/width
+	
+	width/height
 end
 
 # ╔═╡ c86c8d8c-2433-11eb-3c26-e51f78d97a9c
 function split_triangle(triangles::Array{Int64,2}, points::Array{Int64,2}, i::Int64)::Tuple{Array{Int64,2}, Array{Int64,2}}
+	# Split triangle into three parts by adding a point at its centroid
 	triangle = triangles[:, i]
 	
 	new_point = centroid(points[:, triangle])
@@ -386,11 +417,15 @@ Array{Int64,1},
 						  n_neighbors::Array{Int64,1}, im_rgb::Array{N0f8,3},
 						  width::Int64, height::Int64, n_steps::Int64,
 						  step_size::Float64, λ::Float64, τ::Float64, 
+						  split_every::Int64,
 						  max_n_triangles::Int64,
-						  min_triangle_size::Float64
+						  min_triangle_size::Float64,
+						  max_triangle_stretchedness::Float64
 						  )::Tuple{Array{Int64,2}, Array{Int64,2}}
+	# Perform `n_steps` of gradient descent 
 	
 	for j in 1:n_steps
+		println(j)
 		# Number of points and triangles can increase each step
 		n_triangles = size(triangles)[2]
 		n_points = size(points)[2]
@@ -411,14 +446,18 @@ Array{Int64,1},
 		end
 		
 		# Add triangles if error larger than threshold
-		if n_triangles < max_n_triangles
+		if (j % split_every == 0) & (n_triangles < max_n_triangles)
 			for i in 1:n_triangles
 				triangle = points[:, triangles[:, i]]
 				rmtae = sqrt(triangle_error(triangle, im_rgb; mean = true))
 				size = triangle_size(triangle)
-				if (rmtae > τ) & (size > min_triangle_size)
-					points, triangles = split_triangle(triangles, points, i)
-					neighbors, neighbor_start_index, n_neighbors = generate_neighbors_lists(points, triangles)
+				stretchedness = triangle_stretchedness(triangle)
+				if (rmtae > τ) & (size > min_triangle_size) & (stretchedness < max_triangle_stretchedness)
+					n_neigh = [n_neighbors[p] for p in triangles[:, i]]
+					if maximum(n_neigh) < 100
+						points, triangles = split_triangle(triangles, points, i)
+						neighbors, neighbor_start_index, n_neighbors = generate_neighbors_lists(points, triangles)
+					end
 				end
 			end
 		end
@@ -428,40 +467,39 @@ Array{Int64,1},
 end
 
 # ╔═╡ 21c14a46-13c8-11eb-2780-2f4d79801128
-im = load("baardman.jpg")
+im = load("baardman_2.jpg")
 
-# ╔═╡ ad415226-1195-11eb-2b9f-73142b04de89
+# ╔═╡ c1549940-2765-11eb-32a2-3ff9fbf5e4e4
 begin	
 	height, width = size(im)
 	im_rgb = real.(channelview(im))
 	im_gray = gray.(float(Gray.(im)))
 	
-
-	step_size = 2.
-	n_steps = 200
-	λ = 0.05 # regularization size
-	τ = 0.2 # threshold to split triangle
-	min_triangle_size = 1/5 * min(height, width) # only split triangle if not too small
-	max_n_triangles = 100 # stop splitting if reached
+	step_size = 4.
+	n_steps = 399
+	λ = 0.2 # regularization size
+	τ = 0.08 # error threshold to split triangle
+	split_every = 10 # split triangles every ... steps
+	min_triangle_size = 1/50 * min(height, width) # only split triangle if not too small
+	max_triangle_stretchedness = 6. # don't want too narrow triangles
+	max_n_triangles = 2000 # stop splitting if reached
 	
 	# Generate initial grid
-	# points, triangles = generate_importance_grid(im_gray, width, height, 5)
-	points, triangles = generate_regular_grid(width, height, 5, 5)
+	# points, triangles = generate_importance_grid(im_gray, width, height, 20)
+	points, triangles = generate_regular_grid(width, height, 6, 6)
  	neighbors, neighbor_start_index, n_neighbors = generate_neighbors_lists(points, triangles)
 	
 	# Perform gradient descent
 	points, triangles = gradient_descent(points, triangles, neighbors,
 										 neighbor_start_index, n_neighbors,
 										 im_rgb, width, height,
-										 n_steps, step_size, λ, τ,
-										 max_n_triangles, min_triangle_size)
+										 n_steps, step_size, λ, τ, split_every,
+										 max_n_triangles, min_triangle_size,
+										 max_triangle_stretchedness)
 	
 	# Draw output image
 	draw_image(triangles, points, im_rgb, width, height)
 end
-
-# ╔═╡ 7ed0a3c0-2526-11eb-1749-bfd5d1d2eb6f
-[triangle_size(points[:, triangles[:, i]]) for i in 1:size(triangles)[2]]
 
 # ╔═╡ Cell order:
 # ╠═e15aff74-1386-11eb-31b2-a364ef6b249a
@@ -483,8 +521,8 @@ end
 # ╠═8e67dbfc-1197-11eb-1ead-e7aee9325796
 # ╠═99ead454-1fa0-11eb-0c97-b159b530ceaa
 # ╠═9ee47e42-2522-11eb-3253-d5a314d33b44
+# ╠═66877a86-2985-11eb-3e14-439d0b057cbb
 # ╠═562a1e58-118b-11eb-28a1-c576d975bb6d
 # ╠═c86c8d8c-2433-11eb-3c26-e51f78d97a9c
 # ╠═21c14a46-13c8-11eb-2780-2f4d79801128
-# ╠═ad415226-1195-11eb-2b9f-73142b04de89
-# ╠═7ed0a3c0-2526-11eb-1749-bfd5d1d2eb6f
+# ╠═c1549940-2765-11eb-32a2-3ff9fbf5e4e4
