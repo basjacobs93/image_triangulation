@@ -1,5 +1,5 @@
 ### A Pluto.jl notebook ###
-# v0.18.0
+# v0.19.8
 
 using Markdown
 using InteractiveUtils
@@ -271,8 +271,8 @@ end
 # ╔═╡ e761f3b8-117f-11eb-12b7-6f1c2a3d0977
 function draw_image(triangles::Array{Int64,2}, points::Array{Int64,2}, 
 					im_rgb::Array{N0f8,3}, width::Int64, height::Int64, 
-					scale::Int64)::Luxor.Drawing	
-	Luxor.@drawsvg begin
+					scale::Int64, i::Int64)::Luxor.Drawing	
+	Luxor.@svg begin
 	
 		Luxor.origin(0, 0)
 		Luxor.background("white")
@@ -288,7 +288,7 @@ function draw_image(triangles::Array{Int64,2}, points::Array{Int64,2},
 			Luxor.poly(verts, :fill)
 			Luxor.poly(verts, :stroke)
 		end
-	end width*scale height*scale
+	end width*scale height*scale "tmp/test" * string(i)
 end
 
 # ╔═╡ 4733f55a-1196-11eb-08b4-3378b081ebc7
@@ -413,6 +413,51 @@ function triangle_stretchedness(triangle)::Float64
 	width/height
 end
 
+# ╔═╡ 3381b436-485d-4ec6-b80c-aa9ddad6624d
+function angle_from_points(point1::Array{Int64}, point2::Array{Int64}, point3::Array{Int64})::Float64
+	# Find interior angle of point1 in triangle point1, point2, point3
+	x1, y1 = point1
+	x2, y2 = point2
+	x3, y3 = point3
+
+	s1 = sqrt((x2-x3)^2 + (y2-y3)^2)
+	s2 = sqrt((x3-x1)^2 + (y3-y1)^2)
+	s3 = sqrt((x1-x2)^2 + (y1-y2)^2)
+
+	acos((s2^2 + s3^2 - s1^2)/(2*s2*s3))
+end
+
+# ╔═╡ 3480aa2c-2e71-4d62-ad15-fc38b17184ba
+function find_flippable_edges(points::Array{Int64,2}, triangles::Array{Int64,2})::Tuple{Vector{Int64}, Vector{Int64}, Tuple{Int64, Int64}} 
+	# Find edges that can be flipped
+	n_triangles = size(triangles)[2]
+	
+	for t in 1:n_triangles
+		nb = Int[]
+		for i in triangles[:, t]
+			# Other triangles adjacent to point
+			tri_n = [ind[2] for ind in findall(triangles .== i)] 
+			append!(nb, tri_n)
+		end
+		common_triangles = [tri for (tri, cnt) in countmap(nb) if ((cnt > 1) & (tri != t))]
+		if length(common_triangles) > 0
+			for t2 in common_triangles
+				common_points = intersect(triangles[:, t], triangles[:, t2])
+				opposite_points = symdiff(triangles[:, t], triangles[:, t2])
+
+				angle1 = angle_from_points(points[:, opposite_points[1]], points[:, common_points[1]], points[:, common_points[2]])
+				angle2 = angle_from_points(points[:, opposite_points[2]], points[:, common_points[1]], points[:, common_points[2]])
+
+				if angle1+angle2 > pi + 0.0001
+					return common_points, opposite_points, (t, t2)
+				end
+			end
+		end
+	end
+	
+	return [-1], [-1], (-1, -1)
+end
+
 # ╔═╡ c86c8d8c-2433-11eb-3c26-e51f78d97a9c
 function split_triangle(triangles::Array{Int64,2}, points::Array{Int64,2}, i::Int64)::Tuple{Array{Int64,2}, Array{Int64,2}}
 	# Split triangle into three parts by adding a point at its centroid
@@ -504,6 +549,7 @@ function gradient_descent(points::Array{Int64,2}, triangles::Array{Int64,2},
 				rmtae = sqrt(triangle_error(triangle, im_rgb; mean = true))
 				size = triangle_size(triangle)
 				stretchedness = triangle_stretchedness(triangle)
+
 				if (rmtae > τ) & (size > min_triangle_size) & (stretchedness < max_triangle_stretchedness)
 					n_neigh = [n_neighbors[p] for p in triangles[:, i]]
 					if maximum(n_neigh) < 100
@@ -522,14 +568,25 @@ function gradient_descent(points::Array{Int64,2}, triangles::Array{Int64,2},
 		# Edge flips to keep triangles as equi-angular as possible
 		# Whenever the sum of the two angles that are opposite to an edge exceeds 180◦, an edge flip is performed
 		if j % split_every == 0
+			# Two triangles are candidates if they share two points
+			while true
+				common_points, opposite_points, (t1, t2) = find_flippable_edges(points, triangles)
+				if common_points[1] == -1
+					break
+				end
 			
+				triangles[:, t1] = [common_points[1], opposite_points[1], 
+								    opposite_points[2]]
+				triangles[:, t2] = [common_points[2], opposite_points[1], 
+									opposite_points[2]]
+			end
 		end
-
+		neighbors, neighbor_start_index, n_neighbors = generate_neighbors_lists(points, triangles)
 
 		# Edge collapse of small triangles
 		# Prevent vertices collapsing onto each other
 		remove_edges = []
-		if j % split_every == 0
+		if j % split_every == 0 && false
 			for i in 1:n_triangles
 				triangle = points[:, triangles[:, i]]
 				area = triangle_area(triangle)
@@ -554,13 +611,15 @@ function gradient_descent(points::Array{Int64,2}, triangles::Array{Int64,2},
 			end
 			# Remove points that belong to 2 triangles to be collapsed
 			remove_points = [pt for (pt, cnt) in countmap(remove_edges) if cnt > 1]
-			println(remove_points)
 			for i in remove_points
+				println("Remove point")
 				points, triangles = remove_point(triangles, points, i, neighbors, neighbor_start_index, n_neighbors)
 				neighbors, neighbor_start_index, n_neighbors = generate_neighbors_lists(points, triangles)
 
 			end
 		end
+
+		draw_image(triangles, points, im_rgb, width, height, 1, j)
 		
 	end
 	
@@ -568,7 +627,7 @@ function gradient_descent(points::Array{Int64,2}, triangles::Array{Int64,2},
 end
 
 # ╔═╡ 21c14a46-13c8-11eb-2780-2f4d79801128
-im = load("grauwe_klauwier.png")
+im = load("daan/daan.png")
 
 # ╔═╡ c1549940-2765-11eb-32a2-3ff9fbf5e4e4
 begin	
@@ -576,20 +635,20 @@ begin
 	im_rgb = real.(channelview(im))
 	im_gray = gray.(float(Gray.(im)))
 	
-	step_size = 4.
-	n_steps = 10
-	λ = 0.2 # regularization size
+	step_size = 5.
+	n_steps = 249
+	λ = 0.002 # regularization size
 	τ = 0.1 # error threshold to split triangle
-	split_every = 10 # split triangles every ... steps
-	min_triangle_size = 1/80 * min(height, width) # only split triangle if not too small
-	max_triangle_stretchedness = 4. # don't want too narrow triangles
-	max_n_triangles = 3000 # stop splitting if reached
+	split_every = 20 # split triangles every ... steps
+	min_triangle_size = 1/100 * min(height, width) # only split triangle if not too small
+	max_triangle_stretchedness = 50. # don't want too narrow triangles
+	max_n_triangles = 5000 # stop splitting if reached
 	min_area = 1/10000 * width * height # collapse edge if area is less than
 	
 	# Generate initial grid
-	points, triangles = generate_importance_grid(im_gray, width, height, 100)
+	points, triangles = generate_regular_grid(width, height, 5, 5)
+	# points, triangles = generate_importance_grid(im_gray, width, height, 20)
 
-	# points, triangles = generate_regular_grid(width, height, 40, 40)
  	neighbors, neighbor_start_index, n_neighbors = generate_neighbors_lists(points, triangles)
 	
 	# Perform gradient descent
@@ -599,9 +658,6 @@ begin
 										 n_steps, step_size, λ, τ, split_every,
 										 max_n_triangles, min_triangle_size,
 										 max_triangle_stretchedness, min_area)
-
-	# Draw output image
-	draw_image(triangles, points, im_rgb, width, height, 20)
 end
 
 # ╔═╡ 00000000-0000-0000-0000-000000000001
@@ -1764,6 +1820,8 @@ version = "3.5.0+0"
 # ╠═9ee47e42-2522-11eb-3253-d5a314d33b44
 # ╠═ea76e3f6-6ef6-4375-a635-b8720fab5602
 # ╠═66877a86-2985-11eb-3e14-439d0b057cbb
+# ╠═3381b436-485d-4ec6-b80c-aa9ddad6624d
+# ╠═3480aa2c-2e71-4d62-ad15-fc38b17184ba
 # ╠═562a1e58-118b-11eb-28a1-c576d975bb6d
 # ╠═c86c8d8c-2433-11eb-3c26-e51f78d97a9c
 # ╠═fa734135-983f-4ea2-b3f3-fee90a97dc26
