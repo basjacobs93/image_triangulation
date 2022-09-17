@@ -4,5 +4,5 @@ This project conains a Pluto notebook that performs image triangulation based on
 
 Explanation can be found on https://www.basjacobs.com/post/2020-11-18-image-triangulation-with-julia/.
 
-![](wulp.jpg)
-![](wulp_triangle.svg)
+<img src="wulp.jpg" width="500" height="341">
+<img src="wulp_triangle.svg" width="500" height="341">
